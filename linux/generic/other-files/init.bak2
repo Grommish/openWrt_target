@@ -1,0 +1,127 @@
+#!/bin/sh
+# Copyright (C) 2006 OpenWrt.org
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t tmpfs dev /dev
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+
+# Figure out what mode the Shield is in
+# We need to determine what Mode the Shield is in - Time to query the GPIOs
+GPIO=99
+GPIO16=99
+GPIO17=99
+
+GPIO=16
+echo ${GPIO} > /sys/class/gpio/export
+echo in > /sys/class/gpio/gpio$GPIO/direction
+GPIO16=$(cat /sys/class/gpio/gpio${GPIO}/value)
+echo $GPIO > /sys/class/gpio/unexport
+
+GPIO=17
+echo $GPIO > /sys/class/gpio/export
+echo in > /sys/class/gpio/gpio$GPIO/direction
+GPIO17=$(cat /sys/class/gpio/gpio${GPIO}/value)
+echo $GPIO > /sys/class/gpio/unexport
+
+if [ $GPIO16 -eq 0 ]; then
+   # Gateway Mode
+   SHIELD_MODE="Gateway"
+   sys_ext=/sys/block/mmcblk1/mmcblk1p3
+   dev_ext=/dev/mmcblk1p3
+   dev_ext_major=179
+   dev_ext_minor=3
+else
+   if [ $GPIO17 -eq 0 ]; then
+      # Bridge Mode
+      SHIELD_MODE="Bridge"
+      sys_ext=/sys/block/mmcblk1/mmcblk1p4
+      dev_ext=/dev/mmcblk1p4
+      dev_ext_major=179
+      dev_ext_minor=4
+   else
+      # Router Mode
+      SHIELD_MODE="Router"
+      sys_ext=/sys/block/mmcblk1/mmcblk1p2
+      dev_ext=/dev/mmcblk1p2
+      dev_ext_major=179
+      dev_ext_minor=2
+   fi
+fi
+
+extroot_dir=/extroot
+count=0
+
+while true
+do
+    if [[ ${count} -eq 25 ]]
+    then
+        echo "Timed out."; break
+    fi
+
+    if [ -d ${sys_ext} ]
+    then
+        echo "Found ${sys_ext} : ${count}"; break
+    fi
+
+    sleep 1; echo "Waiting for external root for ${SHIELD_MODE}: ${dev_ext} : ${count}"; count=$((count+1))
+done
+
+if [ ! -b ${dev_ext} ]
+then
+    echo "Creating ${dev_ext}"; mknod ${dev_ext} b ${dev_ext_major} ${dev_ext_minor}
+fi
+
+mkdir ${extroot_dir}
+echo "Mounting external root for ${SHIELD_MODE} ${dev_ext} on ${extroot_dir}"
+mount ${dev_ext} ${extroot_dir} -o noatime
+
+umount /sys
+umount /proc
+umount /dev/pts
+umount /dev
+
+count=0
+while true
+do
+    if [ -e ${extroot_dir}/init ]
+    then
+	# Found an init, but is it ours?
+	if [ -e ${extroot_dir}/.norwits ]
+	then
+           echo "Found ${extroot_dir}/init"
+	   exec switch_root ${extroot_dir} /sbin/init
+	else
+
+	   # Not our init!  Removing the old stuff
+           echo "${extroot_dir}/init not found!  Setting up block device for initial boot."
+#	   rm -rf ${extroot_dir}/*
+           # Settings up the extroot block
+           cp -a bin dev etc init lib lib64 mnt overlay rom root sbin tmp usr var www ${extroot_dir}
+           sleep 10
+           mkdir -p ${extroot_dir}/proc ${extroot_dir}/sys
+           echo "# Empty File to validate correct block setup - DO NOT REMOVE" > ${extroot_dir}/.norwits
+           # Setting up first-boot configs
+           exec /etc/config/firstboot-sh
+        fi
+#    else
+        # No init found - Setting up the extroot block
+#        echo "${extroot_dir}/init not found!  Setting up block device for initial boot."
+#        cp -a bin dev etc init lib lib64 mnt overlay rom root sbin tmp usr var www ${extroot_dir}
+#	sleep 10
+#        mkdir -p ${extroot_dir}/proc ${extroot_dir}/sys
+#        echo "# Empty File to validate correct block setup - DO NOT REMOVE" > ${extroot_dir}/.norwits
+	# Setting up first-boot configs
+#	exec /etc/config/firstboot-sh
+    fi
+
+    sleep 1; echo "Checking for ${extroot_dir}/init : ${count}"; count=$((count+1))
+
+    if [[ ${count} -eq 5 ]]
+    then
+        echo "Timed out."; break
+    fi
+done
+
+export INITRAMFS=1
+exec /sbin/init
